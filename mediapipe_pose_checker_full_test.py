@@ -1,16 +1,19 @@
+# test_multipose_runner.py
+
 import cv2
 import json
 import time
 import threading
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
-from mediapipe_pose_checker import MediapipePoseModule  # process(frame) -> (class_id, bbox, conf)
+# Çoklu kişi modülü (liste döndürür)
+from mediapipe_pose_checker import MultiPoseManager  # process(frame)->List[(class_id, bbox, conf)]
 
 # =========================
 # 0) Konfig
 # =========================
 IS_VIDEO = True  # True => VIDEO_PATH, False => RTSP_URL
-VIDEO_PATH = r"yak2.mp4"
+VIDEO_PATH = r"sample_videos/sample7.mp4"
 RTSP_URL = r"rtsp://user:pass@192.168.1.10:554/stream1"
 
 # Görüntü yüksekliği hedefi (0 => ekran %85)
@@ -19,7 +22,7 @@ DISPLAY_HEIGHT = 0
 # Oynatma hızı ve senkron
 PLAY_SPEED = 1.0          # 1.0 normal, 0.5 yavaş, 2.0 hızlı
 DROP_LATE_FRAMES = False  # True ise geç kalmış kareleri atar (daha akıcı, ama atlama olabilir)
-MAX_FRAME_DELAY_MS = 40  # Geç kalmış sayılacak eşik (drop için)
+MAX_FRAME_DELAY_MS = 50   # Geç kalmış sayılacak eşik (drop için)
 
 PRINT_JSON = True
 SHOW_OVERLAY = False
@@ -60,23 +63,43 @@ def resize_to_height(frame, target_h: int):
     interp = cv2.INTER_AREA if target_h < h else cv2.INTER_LINEAR
     return cv2.resize(frame, (new_w, target_h), interpolation=interp)
 
-def draw_light_overlays(frame, class_id: int, bbox: Optional[Tuple[int,int,int,int]], conf: float, fps: float, latency_ms: float):
-    if DRAW_BBOX and bbox is not None:
-        x, y, w, h = map(int, bbox)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 190, 255), 2, cv2.LINE_AA)
+def draw_multi_overlays(
+    frame,
+    results: List[Tuple[int, Optional[Tuple[int,int,int,int]], float]],
+    fps: float,
+    latency_ms: float
+):
+    """
+    Çoklu kişi için hafif overlay: BBox çizimi (opsiyonel) + üstte durum satırları.
+    """
+    shown = frame
+    cls_map = {0: "T-POSE", 1: "ARMS-UP", -1: "None"}
+    # BBox'lar
+    if DRAW_BBOX:
+        for idx, (_cid, bbox, _conf) in enumerate(results):
+            # if _cid == -1 or bbox is None:  # <<< -1 olanları ve boş bbox'ları atla
+            #     continue
+            if bbox is None:  # <<< boş bbox'ları atla
+                continue
+            x, y, w, h = map(int, bbox)
+            cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 190, 255), 2, cv2.LINE_AA)
+            cv2.putText(shown, f"#{idx}", (x, max(0, y-6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,190,255), 1, cv2.LINE_AA)
+
+    # Üst bilgilendirme
     if SHOW_OVERLAY:
-        cls_map = {0: "T-POSE", 1: "ARMS-UP", -1: "None"}
-        lines = [
-            f"Class: {cls_map.get(int(class_id), str(class_id))}",
-            f"Conf: {conf:.2f}",
-            f"FPS: {fps:.1f}",
-            f"Latency: {latency_ms:.1f} ms",
-        ]
+        lines = [f"Persons: {len(results)}", f"FPS: {fps:.1f}", f"Latency: {latency_ms:.1f} ms"]
+        # Kişi satırları
+        for idx, (cid, _bbox, conf) in enumerate(results):
+            # if cid == -1:
+            #     continue  # MediaPipe poz bulamadı → atla
+            lines.append(f"[{idx}] {cls_map.get(int(cid), str(cid))}  conf={conf:.2f}")
+
         x0, y0 = 12, 24
         for i, text in enumerate(lines):
-            cv2.putText(frame, text, (x0, y0 + i*22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-    return frame
+            cv2.putText(shown, text, (x0, y0 + i*22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+    return shown
 
 class LatestFrameReader:
     """RTSP için: arka planda sürekli en güncel frame'i tutar (buffer=1)."""
@@ -117,36 +140,22 @@ class VideoClock:
     """
     def __init__(self, cap: cv2.VideoCapture, play_speed: float = 1.0):
         self.play_speed = max(0.05, float(play_speed))
-        # Kaynak FPS
         fps = cap.get(cv2.CAP_PROP_FPS)
         self.src_fps = fps if fps and fps > 1e-3 else 30.0
         self.frame_dt_ms = 1000.0 / self.src_fps
-        # Başlangıç zamanları
         self.t0 = time.perf_counter()
-        self.base_ms = cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0  # mevcut video timestamp
+        self.base_ms = cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0
         self.last_target_ms = self.base_ms
 
     def next_sleep(self, current_ms: Optional[float]) -> float:
-        """
-        Bu kare için ne kadar uyumalı?
-        current_ms: video timestamp (ms), yoksa None => frame_dt artımsal
-        return: uyuma süresi saniye cinsinden (negatif ise geç kalınmış)
-        """
         if current_ms is None or current_ms <= 0:
-            # timestamp yok; CFR varsayımıyla ilerle
             target_ms = self.last_target_ms + self.frame_dt_ms
         else:
             target_ms = current_ms
-
-        # Gerçek dünya zamanı → hedef duvar saati:
-        elapsed_wall = (time.perf_counter() - self.t0) * 1000.0  # ms
-        # Video zamanı ile duvar saatini eşle
+        elapsed_wall = (time.perf_counter() - self.t0) * 1000.0
         ideal_wall_ms = (target_ms - self.base_ms) / self.play_speed
         sleep_ms = ideal_wall_ms - elapsed_wall
-
-        # bir sonraki tur için sakla
         self.last_target_ms = target_ms
-
         return sleep_ms / 1000.0
 
 def build_capture() -> cv2.VideoCapture:
@@ -174,7 +183,7 @@ def main():
     global SHOW_OVERLAY, DRAW_BBOX
 
     cap = build_capture()
-    pipe = MediapipePoseModule()
+    pipe = MultiPoseManager(topk=2)  # maksimum 2 kişi
 
     # RTSP: arka plan okuyucu; Video: doğrudan read()
     reader = None
@@ -189,7 +198,6 @@ def main():
     fullscreen = False
     last_shown_shape = (0, 0)
 
-    # Video dosyası için saat
     vclock = VideoClock(cap, PLAY_SPEED) if IS_VIDEO else None
 
     try:
@@ -201,7 +209,6 @@ def main():
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     break  # video bitti
-                # Timestamp (ms) — bazı dosyalarda 0 gelebilir
                 pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             else:
                 frame = reader.read()
@@ -210,15 +217,21 @@ def main():
                     continue
                 pos_ms = None  # RTSP'de timestamp güvenilir değil
 
-            # --- Pipe ---
-            class_id, bbox, conf = pipe.process(frame)
+            # --- Pipe (çoklu kişi) ---
+            results = pipe.process(frame)  # List[(class_id, bbox, conf)]
 
+            # --- JSON çıktı ---
             if PRINT_JSON:
                 out = {
                     "i": frame_idx,
-                    "class": int(class_id),
-                    "bbox": list(map(int, bbox)) if bbox is not None else None,
-                    "conf": float(conf),
+                    "persons": [
+                        {
+                            "class": int(cid),
+                            "bbox": list(map(int, bb)) if bb is not None else None,
+                            "conf": float(cf),
+                        }
+                        for (cid, bb, cf) in results
+                    ]
                 }
                 print(json.dumps(out, ensure_ascii=False))
 
@@ -227,7 +240,7 @@ def main():
             if SHOW_OVERLAY or DRAW_BBOX:
                 shown = frame.copy()
                 latency_ms = (time.perf_counter() - t0) * 1000.0
-                shown = draw_light_overlays(shown, class_id, bbox, conf, fps=fps, latency_ms=latency_ms)
+                shown = draw_multi_overlays(shown, results, fps=fps, latency_ms=latency_ms)
 
             shown = resize_to_height(shown, TARGET_DISPLAY_HEIGHT)
 
@@ -250,14 +263,10 @@ def main():
             # --- Oynatma senkronu (yalnızca video dosyası) ---
             if IS_VIDEO:
                 sleep_s = vclock.next_sleep(pos_ms if pos_ms and pos_ms > 0 else None)
-
                 if DROP_LATE_FRAMES and sleep_s < -MAX_FRAME_DELAY_MS / 1000.0:
-                    # Çok geride kaldık; sonraki kareye hemen geç (uyuma)
                     pass
                 else:
-                    # Negatifse hiç uyuma, pozitifse uyku
                     if sleep_s > 0:
-                        # düşük çözünürlüklü uyku (CPU yemesin)
                         time.sleep(min(sleep_s, 0.2))
 
             # --- Tuşlar ---

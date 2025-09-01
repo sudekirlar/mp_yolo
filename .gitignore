@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Sanal Ortamlar (venv, conda)
+venv/
+env/
+.venv/
+.env/
+
+# IDE Ayarları - PyCharm
+.idea/
+
+# Yapay Zeka / Makine Öğrenmesi Özel Dosyaları
+# Model ağırlıklarını ve veri setlerini ASLA repoya ekleme!
+*.pt
+*.pth
+*.weights
+*.h5
+*.onnx
+
+# Veri ve Çıktı Klasörleri
+data/
+dataset/
+datasets/
+images/
+videos/
+outputs/
+runs/
+logs/
+models/
+sample_videos/
+
+# İşletim Sistemi Dosyaları
+.DS_Store
+Thumbs.db
+
+# Hassas Bilgiler
+*.env
+config.ini

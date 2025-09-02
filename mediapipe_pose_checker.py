@@ -20,13 +20,14 @@ import math
 import time
 import threading
 import queue
+import json  # <<< debug çıktıları için eklendi
 
 # ========= 0) Konfig (pipeline parametreleri – korunmuştur) =========
-MODEL_PATH = 'models/yolov8n.pt'
+MODEL_PATH = 'models/yolov8s.pt'
 PERSON_CLASS_ID = 0
 
 # Eşikler ve parametreler
-MIN_YOLO_CONF = 0.52
+MIN_YOLO_CONF = 0.65
 # Dinamik padding
 BBOX_PADDING_BASE  = 36
 BBOX_PADDING_TPOSE = 56
@@ -528,7 +529,30 @@ class _TrackerPoseWorker(threading.Thread):
             if res and res.pose_landmarks:
                 lm_full = translate_landmarks_to_full(res.pose_landmarks, (sx, sy, sw, sh), frame_shape)
                 lm_full = self.joint_smoother.smooth(lm_full, frame_shape)
-                label, conf, _ = classify_pose_tpose_armsup(lm_full, frame_shape)
+                label, conf, dbg = classify_pose_tpose_armsup(lm_full, frame_shape)  # <<< dbg'yi al
+
+                # --- Geçici debug: Unknown + düşük güven için konsola yaz ---
+                if label == "Unknown" and conf < 0.5 and isinstance(dbg, dict):
+                    # güvenli erişim
+                    reason = dbg.get("reason", None)
+                    labels = dbg.get("labels", {}) if isinstance(dbg.get("labels", {}), dict) else {}
+                    two_d  = dbg.get("two_d", {}) if isinstance(dbg.get("two_d", {}), dict) else {}
+                    core_conf = dbg.get("core_conf", None)
+
+                    print_data = {
+                        "reason": reason if isinstance(reason, str) else None,
+                        "core_visibility": f"{core_conf:.2f}" if isinstance(core_conf, (int, float)) else None,
+                        "geom_label": labels.get("geom"),
+                        "two_d_label": labels.get("two_d"),
+                        "t2d_score": f"{two_d.get('t2d'):.2f}" if isinstance(two_d.get("t2d"), (int, float)) else None,
+                        "up2d_score": f"{two_d.get('up2d'):.2f}" if isinstance(two_d.get("up2d"), (int, float)) else None,
+                    }
+                    try:
+                        print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details: {json.dumps(print_data, ensure_ascii=False)}")
+                    except Exception:
+                        # json serileştirme sorunlarına karşı fallback
+                        print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details (raw): {print_data}")
+
                 self.pose_buf.push(label)
                 maj_label, maj_cnt, _ = self.pose_buf.majority()
                 final_label = maj_label if (maj_label!="Unknown" and maj_cnt>=POSE_STABLE_MIN) else label
@@ -537,6 +561,14 @@ class _TrackerPoseWorker(threading.Thread):
                     self.last_conf  = conf
                     self.last_ok    = True
             else:
+                # --- MediaPipe hiç landmark bulamadı: ROI'yi diske kaydet ---
+                try:
+                    os.makedirs("debug_fails", exist_ok=True)
+                    fail_path = os.path.join("debug_fails", f"fail_{time.time_ns()}.png")
+                    cv2.imwrite(fail_path, rgb_roi)
+                    print(f"[DEBUG - TRACKER] MediaPipe found NO landmarks. Failed ROI saved to: {fail_path}")
+                except Exception as e:
+                    print(f"[DEBUG - TRACKER] Failed to save ROI: {e}")
                 with self.out_lock:
                     self.last_ok = False
 
@@ -773,9 +805,7 @@ class MultiPoseManager:
         unmatched = [(dbox, conf) for di, (dbox, conf) in enumerate(dets) if di not in used_det]
 
         # ---- Spawn guard: Önce pending'e koy, teyit olanları spawn et ----
-        # Mevcut track'lere çok benzeyenleri direkt ele (spawn etme).
         unmatched_filtered = [(bb, cf) for (bb, cf) in unmatched if not self._too_similar_to_any_tracker(bb, frame_shape)]
-        # Histerezisli spawn kararı
         to_spawn = self._update_pending_spawn(unmatched_filtered, frame_shape)
         for bb in to_spawn:
             self._spawn_tracker(bb, frame_shape)
@@ -810,7 +840,6 @@ class MultiPoseManager:
                     continue
                 iou = _iou_xywh(tri.bbox, trj.bbox)
                 if iou >= TRACK_SUPPRESS_IOU and _center_dist(tri.bbox, trj.bbox) <= cthr:
-                    # genç olanı öldür (age küçük olan gençtir)
                     kill = ti if tri.age < trj.age else tj
                     to_kill.add(kill)
         for k in to_kill:
@@ -824,8 +853,6 @@ class MultiPoseManager:
         """
         if frame_bgr is None or frame_bgr.size == 0:
             return []
-
-        H, W = frame_bgr.shape[:2]
 
         # ---- YOLO: top-K detection + adaptif imgsz ----
         dets = yolo_detect_persons(self.yolo_model, frame_bgr, self.yolo_imgsz_runtime)

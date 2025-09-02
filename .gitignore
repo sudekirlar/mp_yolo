@@ -35,6 +35,7 @@ runs/
 logs/
 models/
 sample_videos/
+debug_fails/
 
 # İşletim Sistemi Dosyaları
 .DS_Store

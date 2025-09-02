@@ -13,7 +13,7 @@ from mediapipe_pose_checker import MultiPoseManager  # process(frame)->List[(cla
 # 0) Konfig
 # =========================
 IS_VIDEO = True  # True => VIDEO_PATH, False => RTSP_URL
-VIDEO_PATH = r"sample_videos/sample7.mp4"
+VIDEO_PATH = r"sample_videos/sample8.MOV"
 RTSP_URL = r"rtsp://user:pass@192.168.1.10:554/stream1"
 
 # Görüntü yüksekliği hedefi (0 => ekran %85)
@@ -77,10 +77,10 @@ def draw_multi_overlays(
     # BBox'lar
     if DRAW_BBOX:
         for idx, (_cid, bbox, _conf) in enumerate(results):
-            # if _cid == -1 or bbox is None:  # <<< -1 olanları ve boş bbox'ları atla
-            #     continue
-            if bbox is None:  # <<< boş bbox'ları atla
+            if _cid == -1 or bbox is None:  # <<< -1 olanları ve boş bbox'ları atla
                 continue
+            # if bbox is None:  # <<< boş bbox'ları atla
+            #     continue
             x, y, w, h = map(int, bbox)
             cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 190, 255), 2, cv2.LINE_AA)
             cv2.putText(shown, f"#{idx}", (x, max(0, y-6)),
@@ -91,14 +91,14 @@ def draw_multi_overlays(
         lines = [f"Persons: {len(results)}", f"FPS: {fps:.1f}", f"Latency: {latency_ms:.1f} ms"]
         # Kişi satırları
         for idx, (cid, _bbox, conf) in enumerate(results):
-            # if cid == -1:
-            #     continue  # MediaPipe poz bulamadı → atla
+            if cid == -1:
+                continue  # MediaPipe poz bulamadı → atla
             lines.append(f"[{idx}] {cls_map.get(int(cid), str(cid))}  conf={conf:.2f}")
 
         x0, y0 = 12, 24
         for i, text in enumerate(lines):
             cv2.putText(shown, text, (x0, y0 + i*22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (102, 255 ,0), 1, cv2.LINE_AA)
     return shown
 
 class LatestFrameReader:

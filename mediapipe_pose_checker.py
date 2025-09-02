@@ -23,14 +23,14 @@ import queue
 import json  # <<< debug çıktıları için eklendi
 
 # ========= 0) Konfig (pipeline parametreleri – korunmuştur) =========
-MODEL_PATH = 'models/yolov8s.pt'
+MODEL_PATH = 'models/yolov8m.pt'
 PERSON_CLASS_ID = 0
 
 # Eşikler ve parametreler
 MIN_YOLO_CONF = 0.65
 # Dinamik padding
-BBOX_PADDING_BASE  = 36
-BBOX_PADDING_TPOSE = 56
+BBOX_PADDING_BASE  = 45
+BBOX_PADDING_TPOSE = 70
 # MediaPipe
 MP_MIN_DET = 0.60
 MP_MIN_TRK = 0.50
@@ -74,11 +74,11 @@ UNKNOWN_STREAK_RESET = 3
 # Pose eşikleri (geometri kanalı – korunmuştur)
 POSE_MIN_VIS           = 0.5
 POSE_BUFFER_N          = 9
-POSE_STABLE_MIN        = 4
-TPOSE_SPINE_MIN, TPOSE_SPINE_MAX = 80.0, 105.0
-TPOSE_ELBOW_MIN = 160.0
-ARMSUP_SPINE_MAX = 35.0
-ARMSUP_ELBOW_MIN = 130.0
+POSE_STABLE_MIN        = 3
+TPOSE_SPINE_MIN, TPOSE_SPINE_MAX = 70.0, 115.0
+TPOSE_ELBOW_MIN = 155.0
+ARMSUP_SPINE_MAX = 45.0
+ARMSUP_ELBOW_MIN = 125.0
 
 # Çoklu-kişi – eşleştirme ve yaşam kontrol parametreleri
 TOPK_PERSONS       = 2
@@ -462,7 +462,7 @@ def classify_pose_tpose_armsup(landmarks, frame_shape) -> Tuple[str, float, dict
     y_shoulder_mean   = ny(mid_sh)
     y_head_norm       = head_y / H
 
-    t_spread_score   = float(np.clip((spread_x_wrist-0.30)/0.20,0.0,1.0))
+    t_spread_score   = float(np.clip((spread_x_wrist-0.22)/0.20,0.0,1.0))
     t_y_align_score  = float(np.clip(1.0 - abs(y_wrist_mean - y_shoulder_mean)/0.07,0.0,1.0))
     t2d = 0.7*t_spread_score + 0.3*t_y_align_score
 
@@ -470,9 +470,9 @@ def classify_pose_tpose_armsup(landmarks, frame_shape) -> Tuple[str, float, dict
     up_spread_small_score = float(np.clip(1.0 - (spread_x_wrist - 1.1*max(1e-6,spread_x_shoulder))/0.15,0.0,1.0))
     up2d = 0.7*up_vertical_score + 0.3*up_spread_small_score
 
-    if (t2d-up2d)>0.10 and t2d>=0.55:
+    if (t2d-up2d)>0.10 and t2d>=0.45:
         label_2d="T-POSE"; two_d_score=t2d
-    elif (up2d-t2d)>0.10 and up2d>=0.55:
+    elif (up2d-t2d)>0.10 and up2d>=0.45:
         label_2d="ARMS-UP"; two_d_score=up2d
     else:
         label_2d="Unknown"; two_d_score=max(t2d,up2d)
@@ -486,9 +486,9 @@ def classify_pose_tpose_armsup(landmarks, frame_shape) -> Tuple[str, float, dict
     conf = 0.70*float(np.clip(two_d_score,0.0,1.0)) + \
            0.30*float(np.clip(0.80*conf_visibility + 0.20*float(np.clip(geom_pair,0.0,1.0)),0.0,1.0))
     if label_geom in ("T-POSE","ARMS-UP") and partial_geom:
-        conf *= 0.92
+        conf *= 0.96
     if label in ("T-POSE","ARMS-UP") and upper_vis_avg>=0.60:
-        conf = max(conf, 0.60)
+        conf = max(conf, 0.5)
     conf = float(np.clip(conf,0.0,1.0))
 
     dbg = {"core_conf":core_conf,"upper_vis_avg":upper_vis_avg,"wrists_vis_avg":wrists_vis_avg,

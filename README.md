@@ -134,3 +134,9 @@ flowchart LR
 
 * Photo: *“Drop to Hand”* — competition shot.
 * Stack: Ultralytics YOLOv8, Google MediaPipe, OpenCV (custom CUDA + GStreamer), PyTorch.
+
+---
+
+## 🛠️ Developer
+
+* Sude Kırlar

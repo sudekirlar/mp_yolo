@@ -1,5 +1,9 @@
 # Pose Estimation Pipeline (YOLOv8 + MediaPipe)
 
+![Teknofest 2025 First Place Award](https://img.shields.io/badge/Teknofest_2025-FirstPlace-brightgreen?style=for-the-badge\&logo=data\:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZmZmZiIgZD0iTTEyLDE3LjI3TDE4LjE4LDIxTDE2LjU0LDEzLjk3TDIyLDkuMjRMMS44MSw5LjI0TDE5LjQ1LDEzLjk3TDE3LjgyLDIxTDEyLDE3LjI3WiIvPjwvc3ZnPg==)
+
+This project was developed for the **Teknofest 2025 International UAV Competition, Free Mission Category**, where it was awarded **first place**.
+
 ![Drop to Hand – Competition Photo](assets/photo.jpeg)
 
 This module detects people and classifies two mission-specific poses — **T-POSE** and **ARMS-UP** — in real time.

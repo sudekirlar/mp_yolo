@@ -1,6 +1,6 @@
 # mediaipipe_pose_checker.py
 
-# ========= ENV: BLAS/OpenMP oversubscription engelle =========
+# BLAS/OpenMP oversubscription engellemek için konuldu.
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -9,7 +9,6 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("KMP_AFFINITY", "disabled")
 
-# ========= IMPORTS =========
 import cv2
 from ultralytics import YOLO
 import mediapipe as mp
@@ -20,97 +19,89 @@ import math
 import time
 import threading
 import queue
-import json  # <<< debug çıktıları için eklendi
 
-# ========= 0) Konfig (pipeline parametreleri – korunmuştur) =========
+# Model olarak M modeli seçildi.
 MODEL_PATH = 'models/yolov8m.pt'
 PERSON_CLASS_ID = 0
 
 # Eşikler ve parametreler
-MIN_YOLO_CONF = 0.65
+MIN_YOLO_CONF = 0.55 # YOLO'nun insan kabul ettiği min güven skoru.
 # Dinamik padding
-BBOX_PADDING_BASE  = 45
-BBOX_PADDING_TPOSE = 70
+BBOX_PADDING_BASE  = 45 # MP'ye verilecek box'a padding veriyoruz.
+BBOX_PADDING_TPOSE = 70 # T-Pose daha geniş yer kaplayacağı için daha fazla padding veriyoruz.
 # MediaPipe
-MP_MIN_DET = 0.60
-MP_MIN_TRK = 0.50
-MP_MODEL_COMPLEXITY = 1
+MP_MIN_DET = 0.60 # MP'nin ilk tespitindeki güven eşiği.
+MP_MIN_TRK = 0.50 # MP'nin ilkten sonraki tespitlerinde güven eşiği.
+MP_MODEL_COMPLEXITY = 1 # Burayla oynamak sağlıklı değil.
 # CLAHE tetikleyici
-CLAHE_LUMA_THRESH = 50.0  # ROI ortalama gri < 50 → CLAHE
+CLAHE_LUMA_THRESH = 50.0  # Clahe, kontrastı arttırarak MP'ye vermemizi sağlar.
 
-# Torch/cihaz
+# Torch var mı?
 try:
     import torch
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
 
-DEVICE = "cuda:0" if (_HAS_TORCH and torch.cuda.is_available()) else "cpu"
+DEVICE = "cuda:0" if (_HAS_TORCH and torch.cuda.is_available()) else "cpu" # Destekleyici CUDA
 HALF = DEVICE.startswith("cuda")
 
 # Dinamik YOLO imgsz
 YOLO_IMGSZ_BASE = 448
 YOLO_IMGSZ_HIGH = 640
-SHORT_SIDE_HIGH_IMGSZ_THRESH = 100  # <100 px ise bir sonraki detekte 640
-MIN_SHORT_SIDE_MP = 64              # ROI kısa kenar <64 px ise MP atla
+SHORT_SIDE_HIGH_IMGSZ_THRESH = 100
+MIN_SHORT_SIDE_MP = 64 # Eğer 64 px'den düşükse göremeyeceği için MP tarafını uğraştırmıyoruz.
 
-# ROI stabilizasyon
+# ROI stabilizasyon parametreleri.
 ROI_SMOOTH_ALPHA = 0.5
 ROI_MAX_CENTER_JUMP_PCT = 0.035
 ROI_MAX_SIZE_JUMP_PCT   = 0.04
 
-# One-Euro
-SMOOTH_IDX = [13, 14, 15, 16]
+# One-Euro parametreleri. (Daha yumuşak eklem akışı ile daha iyi tespit sağlamak için.)
+SMOOTH_IDX = [13, 14, 15, 16] # Bu işlemin uygulanacağı eklem noktaları.
 ONE_EURO_FREQUENCY   = 30.0
 ONE_EURO_MINCUTOFF   = 0.8
 ONE_EURO_BETA        = 0.015
 ONE_EURO_DCUT        = 1.0
 
-# Adaptif algılama aralığı (opsiyonel sade kullanım – çoklu kişiyle basitleştirildi)
 DET_MIN, DET_MAX = 1, 8
 LABEL_STABLE_RATIO = 0.70
 UNKNOWN_STREAK_RESET = 3
 
-# Pose eşikleri (geometri kanalı – korunmuştur)
-POSE_MIN_VIS           = 0.5
-POSE_BUFFER_N          = 9
-POSE_STABLE_MIN        = 3
-TPOSE_SPINE_MIN, TPOSE_SPINE_MAX = 70.0, 115.0
-TPOSE_ELBOW_MIN = 155.0
-ARMSUP_SPINE_MAX = 45.0
+# Pose eşikleri (geometri tarafı için.)
+POSE_MIN_VIS           = 0.5 # MP'nin bir eklemi hesaba dahil edebilmesi için gerekli min güven eşiği.
+POSE_BUFFER_N          = 9 # Karar vermeden önce, en son 9 frame'i buffer'a al.
+POSE_STABLE_MIN        = 3 # O pozu kararlı sayabilmek için en az 3 karede görülmeli.
+TPOSE_SPINE_MIN, TPOSE_SPINE_MAX = 70.0, 115.0 # Omurga ile yapılan açı TPOSE için 70 ve 105 arası seçildi.
+TPOSE_ELBOW_MIN = 155.0 # Ayrıca dirseğin sadece kendisini de hesaba katıyoruz.
+ARMSUP_SPINE_MAX = 45.0 # Omurga ile yapılan açı ARMSUP için 45 ve 125 arası olarak seçildi.
 ARMSUP_ELBOW_MIN = 125.0
 
-# Çoklu-kişi – eşleştirme ve yaşam kontrol parametreleri
-TOPK_PERSONS       = 2
-ASSIGN_IOU_MIN     = 0.15                 # IoU altı eşleşme kabul edilmez
-ASSIGN_CENTER_MAXF = 0.12                 # min(W,H)*oran üstü merkez sapması kabul edilmez
-TRACK_AGE_MAX      = 25                   # görünmeyen tracker kapanır
+TOPK_PERSONS       = 2 # Görevde 2 manken olduğu için YOLO'dan en güvenilir maksimum 2 kareyi alabileceğini söylüyoruz.
+ASSIGN_IOU_MIN     = 0.15
+ASSIGN_CENTER_MAXF = 0.12
+TRACK_AGE_MAX      = 25 # Görünmeyen tracker kapanır.
 
-# -------- Yeni: de-dupe / spawn guard / suppression parametreleri --------
-# YOLO post-NMS de-dupe
 DEDUP_IOU_MIN          = 0.60
-DEDUP_CENTER_FRAC      = 0.06              # min(W,H)*oran
-DEDUP_CONTAIN_FRAC     = 0.85              # küçük kutu alanının büyük kutu içinde kalan oranı
-DEDUP_SIZE_SIM_RATIO   = 0.75              # w ve h oran benzerliği alt sınırı
+DEDUP_CENTER_FRAC      = 0.06
+DEDUP_CONTAIN_FRAC     = 0.85
+DEDUP_SIZE_SIM_RATIO   = 0.75
 
-# Spawn-guard (yeni tracker açmayı frenleme)
-SPAWN_DUP_IOU          = 0.55              # mevcut track ile yüksek IoU ise spawn etme
-SPAWN_DUP_CENTER_FRAC  = 0.06              # merkez çok yakınsa spawn etme
-SPAWN_CONFIRM_FRAMES   = 2                 # arka arkaya bu kadar kare teyit
-SPAWN_PENDING_TTL      = 3                 # pending kaydın yaşayacağı kare sayısı
+SPAWN_DUP_IOU          = 0.55
+SPAWN_DUP_CENTER_FRAC  = 0.06 # Merkez çok yakınsa spawn etmiyoruz.
+SPAWN_CONFIRM_FRAMES   = 2
+SPAWN_PENDING_TTL      = 3
 
-# Track-level suppression (fail-safe)
 TRACK_SUPPRESS_IOU     = 0.65
-TRACK_SUPPRESS_CENTERF = 0.05              # merkez çok yakınsa ve IoU yüksekse genç olanı sil
+TRACK_SUPPRESS_CENTERF = 0.05
 
-# ========= 1) OpenCV ayarları =========
+# OpenCV ayarları
 cv2.setUseOptimized(True)
 try: cv2.setNumThreads(0)
 except Exception: pass
 try: cv2.ocl.setUseOpenCL(False)
 except Exception: pass
 
-# ========= 2) Yardımcılar =========
 def clip_bbox(x, y, w, h, W, H) -> Tuple[int, int, int, int]:
     x = max(0, min(int(round(x)), W - 1))
     y = max(0, min(int(round(y)), H - 1))
@@ -140,7 +131,6 @@ def _center_dist(a, b) -> float:
     return math.hypot(dx, dy)
 
 def _containment_ratio(inner, outer) -> float:
-    """inner'ın outer içinde kalan alan oranı (0..1)."""
     ix, iy, iw, ih = inner
     ox, oy, ow, oh = outer
     ix2, iy2 = ix+iw, iy+ih
@@ -153,7 +143,6 @@ def _containment_ratio(inner, outer) -> float:
     return float(inter)/float(iarea)
 
 def _size_similarity(a, b) -> float:
-    """w ve h bazında min(ratio, 1/ratio)'nun ortalaması ~1'e yakınsa benzer."""
     aw, ah = a[2], a[3]; bw, bh = b[2], b[3]
     rw = min(aw/bw, bw/aw) if aw>0 and bw>0 else 0.0
     rh = min(ah/bh, bh/ah) if ah>0 and bh>0 else 0.0
@@ -162,7 +151,6 @@ def _size_similarity(a, b) -> float:
 def _dedup_filter(picked: List[Tuple[Tuple[int,int,int,int], float]],
                   cand_bbox: Tuple[int,int,int,int],
                   frame_shape) -> bool:
-    """True dönerse CANDIDATE'i at (duplicate)."""
     H, W = frame_shape[:2]
     cthr = DEDUP_CENTER_FRAC * min(W, H)
     for pb, _ in picked:
@@ -171,7 +159,6 @@ def _dedup_filter(picked: List[Tuple[Tuple[int,int,int,int], float]],
             return True
         cdist = _center_dist(pb, cand_bbox)
         if cdist <= cthr:
-            # merkez çok yakın; containment veya size benzerliği varsa duplicate say
             contain = max(_containment_ratio(cand_bbox, pb), _containment_ratio(pb, cand_bbox))
             if contain >= DEDUP_CONTAIN_FRAC:
                 return True
@@ -180,9 +167,6 @@ def _dedup_filter(picked: List[Tuple[Tuple[int,int,int,int], float]],
     return False
 
 def select_topk_person_bboxes(results, frame_shape, k=TOPK_PERSONS, min_conf=MIN_YOLO_CONF):
-    """
-    YOLO çıktılarını kişiye göre filtreleyip (post-NMS de-dupe uygulanmış) en iyi k kutuyu döndürür.
-    """
     H, W = frame_shape[:2]
     cands: List[Tuple[Tuple[int,int,int,int], float, float]] = []  # (bbox, conf, score)
     for r in results:
@@ -208,10 +192,8 @@ def select_topk_person_bboxes(results, frame_shape, k=TOPK_PERSONS, min_conf=MIN
     if not cands:
         return []
 
-    # Skora göre sırala
     cands.sort(key=lambda t: t[2], reverse=True)
 
-    # Post-NMS de-dupe + top-k
     picked: List[Tuple[Tuple[int,int,int,int], float]] = []
     for (bb, conf, _score) in cands:
         if _dedup_filter(picked, bb, frame_shape):
@@ -222,7 +204,6 @@ def select_topk_person_bboxes(results, frame_shape, k=TOPK_PERSONS, min_conf=MIN
     return picked
 
 def yolo_detect_persons(model, frame, imgsz: int, device=DEVICE, half=HALF):
-    """Top-K person döndürür (Ultralytics NMS + bizim de-dupe)."""
     try:
         if _HAS_TORCH:
             with torch.inference_mode():
@@ -249,7 +230,6 @@ def translate_landmarks_to_full(landmarks, roi_bbox, frame_shape):
         lm.y = (lm.y * h + base_y) * invH
     return landmarks
 
-# ========= One-Euro ve eklem yumuşatma =========
 class OneEuroFilter:
     def __init__(self, freq, mincutoff=1.0, beta=0.0, dcutoff=1.0):
         self.freq = float(freq)
@@ -310,7 +290,6 @@ class JointSmoother:
             lm.y = float(np.clip(self.fy[i](y_px, t) * invH, 0.0, 1.0))
         return landmarks
 
-# ========= ROI stabilizasyonu =========
 class RoiStabilizer:
     def __init__(self, alpha=ROI_SMOOTH_ALPHA, max_c_jump_pct=ROI_MAX_CENTER_JUMP_PCT, max_s_jump_pct=ROI_MAX_SIZE_JUMP_PCT):
         self.alpha = alpha; self.max_c = max_c_jump_pct; self.max_s = max_s_jump_pct
@@ -337,7 +316,6 @@ class RoiStabilizer:
         sh = self.alpha * h_c + (1.0 - self.alpha) * ph
         self.state = clip_bbox(sx, sy, sw, sh, W, H); return self.state
 
-# ========= 3) Pose sınıflandırma (2D sezgisel + geometri hibrit) =========
 class PoseBuffer:
     def __init__(self, n=POSE_BUFFER_N):
         self.buf = deque(maxlen=n)
@@ -370,6 +348,7 @@ def _elbow_angle_deg(a, b, c) -> float:
     return ang if ang <= 180.0 else 360.0 - ang
 
 def classify_pose_tpose_armsup(landmarks, frame_shape) -> Tuple[str, float, dict]:
+    # Buradaki parametreler oynamaya müsait, conf ağırlık hesaplamasına bakılacak.
     W, H = frame_shape[1], frame_shape[0]
     LM = landmarks.landmark
     def vis(i): return float(LM[i].visibility) if i < len(LM) else 0.0
@@ -498,11 +477,9 @@ def classify_pose_tpose_armsup(landmarks, frame_shape) -> Tuple[str, float, dict
            "labels":{"geom":label_geom,"two_d":label_2d,"final":label}}
     return label, conf, dbg
 
-# ========= 4) Tracker’a bağlı PoseWorker (kişi-özel) =========
 mp_pose = mp.solutions.pose
 
 class _TrackerPoseWorker(threading.Thread):
-    """Her PoseTracker'a ait işçi: ROI → MediaPipe → label/conf."""
     def __init__(self, mp_cfg: dict, smooth_idx: List[int]):
         super().__init__(name="TrackerPoseWorker", daemon=True)
         self.in_q: "queue.Queue[tuple]" = queue.Queue(maxsize=1)
@@ -511,7 +488,6 @@ class _TrackerPoseWorker(threading.Thread):
         self.last_conf  = 0.0
         self.last_ok    = False
         self._stop = threading.Event()
-        # Kişi-özel kaynaklar
         self.pose = mp_pose.Pose(**mp_cfg)
         self.joint_smoother = JointSmoother(smooth_idx)
         self.pose_buf = PoseBuffer(POSE_BUFFER_N)
@@ -529,29 +505,28 @@ class _TrackerPoseWorker(threading.Thread):
             if res and res.pose_landmarks:
                 lm_full = translate_landmarks_to_full(res.pose_landmarks, (sx, sy, sw, sh), frame_shape)
                 lm_full = self.joint_smoother.smooth(lm_full, frame_shape)
-                label, conf, dbg = classify_pose_tpose_armsup(lm_full, frame_shape)  # <<< dbg'yi al
+                label, conf, dbg = classify_pose_tpose_armsup(lm_full, frame_shape)
 
-                # --- Geçici debug: Unknown + düşük güven için konsola yaz ---
-                if label == "Unknown" and conf < 0.5 and isinstance(dbg, dict):
-                    # güvenli erişim
-                    reason = dbg.get("reason", None)
-                    labels = dbg.get("labels", {}) if isinstance(dbg.get("labels", {}), dict) else {}
-                    two_d  = dbg.get("two_d", {}) if isinstance(dbg.get("two_d", {}), dict) else {}
-                    core_conf = dbg.get("core_conf", None)
-
-                    print_data = {
-                        "reason": reason if isinstance(reason, str) else None,
-                        "core_visibility": f"{core_conf:.2f}" if isinstance(core_conf, (int, float)) else None,
-                        "geom_label": labels.get("geom"),
-                        "two_d_label": labels.get("two_d"),
-                        "t2d_score": f"{two_d.get('t2d'):.2f}" if isinstance(two_d.get("t2d"), (int, float)) else None,
-                        "up2d_score": f"{two_d.get('up2d'):.2f}" if isinstance(two_d.get("up2d"), (int, float)) else None,
-                    }
-                    try:
-                        print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details: {json.dumps(print_data, ensure_ascii=False)}")
-                    except Exception:
-                        # json serileştirme sorunlarına karşı fallback
-                        print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details (raw): {print_data}")
+                # DEBUG İÇİNDİR!!!
+                # if label == "Unknown" and conf < 0.5 and isinstance(dbg, dict):
+                #     reason = dbg.get("reason", None)
+                #     labels = dbg.get("labels", {}) if isinstance(dbg.get("labels", {}), dict) else {}
+                #     two_d  = dbg.get("two_d", {}) if isinstance(dbg.get("two_d", {}), dict) else {}
+                #     core_conf = dbg.get("core_conf", None)
+                #
+                #     print_data = {
+                #         "reason": reason if isinstance(reason, str) else None,
+                #         "core_visibility": f"{core_conf:.2f}" if isinstance(core_conf, (int, float)) else None,
+                #         "geom_label": labels.get("geom"),
+                #         "two_d_label": labels.get("two_d"),
+                #         "t2d_score": f"{two_d.get('t2d'):.2f}" if isinstance(two_d.get("t2d"), (int, float)) else None,
+                #         "up2d_score": f"{two_d.get('up2d'):.2f}" if isinstance(two_d.get("up2d"), (int, float)) else None,
+                #     }
+                #     try:
+                #         print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details: {json.dumps(print_data, ensure_ascii=False)}")
+                #     except Exception:
+                #         # json serileştirme sorunlarına karşı fallback
+                #         print(f"[DEBUG - TRACKER] Pose Unknown (low conf). Details (raw): {print_data}")
 
                 self.pose_buf.push(label)
                 maj_label, maj_cnt, _ = self.pose_buf.majority()
@@ -561,7 +536,7 @@ class _TrackerPoseWorker(threading.Thread):
                     self.last_conf  = conf
                     self.last_ok    = True
             else:
-                # --- MediaPipe hiç landmark bulamadı: ROI'yi diske kaydet ---
+                # DEBUG İÇİNDİR!!!
                 try:
                     os.makedirs("debug_fails", exist_ok=True)
                     fail_path = os.path.join("debug_fails", f"fail_{time.time_ns()}.png")
@@ -572,7 +547,6 @@ class _TrackerPoseWorker(threading.Thread):
                 with self.out_lock:
                     self.last_ok = False
 
-# ========= 5) PoseTracker (kişi-özel boru hattı) =========
 class PoseTracker:
     def __init__(self, track_id: int, init_bbox: Tuple[int,int,int,int], frame_shape, mp_cfg: dict):
         self.track_id = track_id
@@ -580,12 +554,10 @@ class PoseTracker:
         self.age = 0
         self.frame_shape = frame_shape
         self.roi_stab = RoiStabilizer()
-        # İlk ROI stabilizasyonu
         self.bbox = self.roi_stab.update(init_bbox, frame_shape)
         self.worker = _TrackerPoseWorker(mp_cfg=mp_cfg, smooth_idx=SMOOTH_IDX)
         self.worker.start()
         self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        # Son etiket (padding seçimi için)
         self._last_label_for_pad = "Unknown"
 
     @staticmethod
@@ -595,7 +567,6 @@ class PoseTracker:
         return -1
 
     def update_detection(self, det_bbox: Tuple[int,int,int,int], frame_shape):
-        """YOLO’dan güncel bbox geldiğinde çağrılır (stabilize edilir)."""
         self.frame_shape = frame_shape
         # T-POSE iken biraz daha geniş pad kullan
         pad = BBOX_PADDING_TPOSE if self._last_label_for_pad == "T-POSE" else BBOX_PADDING_BASE
@@ -605,11 +576,9 @@ class PoseTracker:
         self.age = 0
 
     def mark_missed(self):
-        """Bu karede eşleşemezse çağrılır."""
         self.age += 1
 
     def process_on_frame(self, frame_bgr: np.ndarray) -> Tuple[int, Optional[Tuple[int,int,int,int]], float]:
-        """ROI kırp → CLAHE gerekirse → worker’a ver → son sonucu oku."""
         if self.bbox is None:
             return -1, None, 0.0
         sx, sy, sw, sh = self.bbox
@@ -621,7 +590,6 @@ class PoseTracker:
         if roi.size == 0:
             return -1, None, 0.0
         if min(sw, sh) < MIN_SHORT_SIDE_MP:
-            # ROI çok küçükse MP atla, Unknown dön
             return -1, (sx, sy, sw, sh), 0.0
 
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -639,7 +607,6 @@ class PoseTracker:
         except queue.Full:
             pass
 
-        # Worker’dan son sonucu oku
         with self.worker.out_lock:
             ok_pose  = self.worker.last_ok
             label    = self.worker.last_label
@@ -657,19 +624,12 @@ class PoseTracker:
         except Exception:
             pass
 
-# ========= 6) MultiPoseManager (merkez ofis) =========
 class MultiPoseManager:
-    """
-    Çoklu kişi: her karede [(class_id, bbox, conf), ...] döndürür.
-    Geriye uyumluluk: process_top1(frame) tek kişi bekleyen eski kodlar için.
-    """
     def __init__(self, topk: int = TOPK_PERSONS):
-        # YOLO
         self.yolo_model = YOLO(MODEL_PATH)
         try: self.yolo_model.to(DEVICE)
         except Exception: pass
 
-        # Warm-up (opsiyonel ama stabil)
         try:
             if _HAS_TORCH:
                 torch.backends.cudnn.benchmark = True
@@ -685,19 +645,14 @@ class MultiPoseManager:
         self.topk = max(1, int(topk))
         self.yolo_imgsz_runtime = YOLO_IMGSZ_BASE
 
-        # Tracker havuzu
         self.trackers: Dict[int, PoseTracker] = {}
         self.next_id = 0
 
-        # Eşleştirme kapılaması
         self.iou_min = ASSIGN_IOU_MIN
         self.center_max_frac = ASSIGN_CENTER_MAXF
 
-        # Pending spawn (histerezis)
-        # Eleman: {"bbox":(x,y,w,h), "seen":int, "ttl":int}
         self.pending_spawn: List[Dict] = []
 
-    # ---------- Spawn guard yardımcıları ----------
     def _too_similar_to_any_tracker(self, bbox, frame_shape) -> bool:
         H, W = frame_shape[:2]
         cthr = SPAWN_DUP_CENTER_FRAC * min(W, H)
@@ -711,14 +666,9 @@ class MultiPoseManager:
         return False
 
     def _update_pending_spawn(self, unmatched_dets: List[Tuple[Tuple[int,int,int,int], float]], frame_shape):
-        """
-        Eşleşmeyen det'ler pending'e alınır. Aynı merkeze yakın olanlar 'seen++'.
-        seen>=SPAWN_CONFIRM_FRAMES olunca ve mevcut track'lere benzemiyorsa spawn edilir.
-        """
         H, W = frame_shape[:2]
         cthr = SPAWN_DUP_CENTER_FRAC * min(W, H)
 
-        # TTL azalt ve süresi dolanı at
         new_pending: List[Dict] = []
         for p in self.pending_spawn:
             p["ttl"] -= 1
@@ -726,7 +676,6 @@ class MultiPoseManager:
                 new_pending.append(p)
         self.pending_spawn = new_pending
 
-        # Mevcut pending ile eşleştir
         for dbox, _conf in unmatched_dets:
             matched_idx = -1
             best_dist = 1e9
@@ -741,7 +690,6 @@ class MultiPoseManager:
             else:
                 self.pending_spawn.append({"bbox": dbox, "seen": 1, "ttl": SPAWN_PENDING_TTL})
 
-        # Spawn koşulu
         spawn_list = []
         kept_pending = []
         for p in self.pending_spawn:
@@ -765,7 +713,6 @@ class MultiPoseManager:
         return tr
 
     def _assign_detections(self, dets: List[Tuple[Tuple[int,int,int,int], float]], frame_shape):
-        """Greedy IoU + merkez kapılaması ile 1-1 eşleştirme + spawn-guard/histerezis."""
         if not dets and not self.trackers:
             return
 
@@ -789,11 +736,10 @@ class MultiPoseManager:
                 cdist = _center_dist(tbox, dbox)
                 if cdist > cmax:
                     continue
-                score = iou - 0.001*(cdist / max(cmax,1e-6))  # küçük merkez cezası
+                score = iou - 0.001*(cdist / max(cmax,1e-6))
                 pairs.append((score, ti, di))
         pairs.sort(key=lambda t: t[0], reverse=True)
 
-        # Greedy eşleştirme
         for _score, ti, di in pairs:
             if ti in used_tr or di in used_det:
                 continue
@@ -801,16 +747,13 @@ class MultiPoseManager:
             self.trackers[tid].update_detection(dets[di][0], frame_shape)
             used_tr.add(ti); used_det.add(di)
 
-        # Eşleşmeyen det'ler
         unmatched = [(dbox, conf) for di, (dbox, conf) in enumerate(dets) if di not in used_det]
 
-        # ---- Spawn guard: Önce pending'e koy, teyit olanları spawn et ----
         unmatched_filtered = [(bb, cf) for (bb, cf) in unmatched if not self._too_similar_to_any_tracker(bb, frame_shape)]
         to_spawn = self._update_pending_spawn(unmatched_filtered, frame_shape)
         for bb in to_spawn:
             self._spawn_tracker(bb, frame_shape)
 
-        # Eşleşmeyen tracker → yaşlandır
         for ti, tid in enumerate(tracker_ids):
             if ti in used_tr:
                 continue
@@ -818,16 +761,12 @@ class MultiPoseManager:
             if tr is not None:
                 tr.mark_missed()
 
-        # Yaşı çok artanları temizle
         dead = [tid for tid, tr in self.trackers.items() if tr.age > TRACK_AGE_MAX]
         for tid in dead:
             self.trackers[tid].close()
             del self.trackers[tid]
 
     def _suppress_overlapping_trackers(self, frame_shape):
-        """
-        Fail-safe: Çok benzeşen iki aktif track varsa (yüksek IoU + merkez çok yakın) genç olanı kapat.
-        """
         tids = list(self.trackers.keys())
         H, W = frame_shape[:2]
         cthr = TRACK_SUPPRESS_CENTERF * min(W, H)
@@ -847,40 +786,30 @@ class MultiPoseManager:
             del self.trackers[k]
 
     def process(self, frame_bgr: np.ndarray) -> List[Tuple[int, Optional[Tuple[int,int,int,int]], float]]:
-        """
-        Girdi: BGR frame (numpy)
-        Çıktı: her kişi için (class_id, bbox(x,y,w,h) veya None, conf[0..1])
-        """
         if frame_bgr is None or frame_bgr.size == 0:
             return []
 
-        # ---- YOLO: top-K detection + adaptif imgsz ----
         dets = yolo_detect_persons(self.yolo_model, frame_bgr, self.yolo_imgsz_runtime)
-        # Bir sonraki kare için imgsz adaptasyonu (en küçük kısa kenara göre)
         if dets:
             short_min = min(min(bb[0][2], bb[0][3]) for bb in dets)
             self.yolo_imgsz_runtime = YOLO_IMGSZ_HIGH if short_min < SHORT_SIDE_HIGH_IMGSZ_THRESH else YOLO_IMGSZ_BASE
 
-        # ---- Eşleştirme / Yaşlandırma / Histerezisli Spawn ----
         self._assign_detections(dets, frame_bgr.shape)
 
-        # ---- Fail-safe: Track-level suppression ----
         self._suppress_overlapping_trackers(frame_bgr.shape)
 
-        # ---- Her aktif tracker'ı çalıştır ----
         results: List[Tuple[int, Optional[Tuple[int,int,int,int]], float]] = []
         for tid, tr in list(self.trackers.items()):
             cls_id, bbox, conf = tr.process_on_frame(frame_bgr)
             if bbox is not None:
                 results.append((cls_id, bbox, conf))
 
-        # (İsteğe bağlı) soldan sağa sıralama:
+        # İsteğe bağlı soldan sağa sıralama:
         # results.sort(key=lambda r: (r[1][0] if r[1] else 1e9))
 
         return results
 
     def process_top1(self, frame_bgr: np.ndarray) -> Tuple[int, Optional[Tuple[int,int,int,int]], float]:
-        """Geriye dönük uyumluluk: tek kişi bekleyen eski kodlar için."""
         res = self.process(frame_bgr)
         return res[0] if res else (-1, None, 0.0)
 
